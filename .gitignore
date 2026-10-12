@@ -1,0 +1,24 @@
+# Environment
+.venv/
+__pycache__/
+*.pyc
+
+# Data — 1.7 GB, and none of it is needed. scripts/01_prepare_data.py regenerates
+# the exact 200,000-pair split from the public source in under a minute,
+# deterministically, from seed 2101.
+#   data/raw/all.parquet       227 MB source dump
+#   data/raw/*.onnx            Bindwell's released weights
+#   data/processed/*.npy       ~630 MB of cached embeddings
+#   data/processed/*.parquet   derived tables
+data/
+colab_upload/
+
+# Large binary results, both regenerate in seconds-to-minutes
+#   pooler_diagnostic.npz   from scripts/00_diagnose_pooler.py
+#   released_model_grid.npy from scripts/04_probe_released_model.py
+results/*.npz
+results/*.npy
+
+# OS noise
+.DS_Store
+Thumbs.db

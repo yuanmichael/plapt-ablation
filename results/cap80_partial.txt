@@ -1,0 +1,10 @@
+# 80-epoch cap rerun (mean pooling), stopped after 5 of 9 runs once the
+# question was answered: the 40-epoch cap was not binding. Backs Finding 7.
+# No CSV was written because the job was terminated before its final write.
+
+  full          seed 0  test R = 0.7433  RMSE = 1.0423  dev R = 0.7387  42 ep  1,478,273 params  331.4s
+  full          seed 1  test R = 0.7398  RMSE = 1.0456  dev R = 0.7363  45 ep  1,478,273 params  386.7s
+  full          seed 2  test R = 0.7439  RMSE = 1.0402  dev R = 0.7383  55 ep  1,478,273 params  610.4s
+  mol_zero      seed 0  test R = 0.5506  RMSE = 1.3042  dev R = 0.5560  53 ep  1,478,273 params  537.3s
+  mol_zero      seed 1  test R = 0.5475  RMSE = 1.3022  dev R = 0.5518  37 ep  1,478,273 params  348.6s
+  mol_zero      seed 2  test R = 0.5535  RMSE = 1.3044  dev R = 0.5550  46 ep  1,478,273 params  437.5s

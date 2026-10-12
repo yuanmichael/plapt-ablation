@@ -1,0 +1,18 @@
+# Versions this work was actually run on (Python 3.13, Windows 11, CPU for training).
+# Pinned because "it worked last week" is not a reproducibility claim.
+#
+# torch is CPU-only here. Training the 1.48M-parameter head takes ~8s/epoch on a
+# laptop CPU; only scripts/02_embed.py wants a GPU, and that runs on Colab.
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+numpy==2.5.4
+pandas==3.0.6
+pyarrow==26.0.0
+scikit-learn==1.9.1
+matplotlib
+requests
+huggingface_hub
+onnx
+onnxruntime==1.31.0
+transformers==5.19.0
+torch==2.14.1

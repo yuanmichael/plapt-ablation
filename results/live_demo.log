@@ -1,0 +1,60 @@
+embeddings: prot (8638, 1024) float32, mol (182402, 768) float16  (pooling=mean)
+train 162,000  dev 18,000  test 20,000   |  test rows with an unseen protein: 469
+
+--- zero-parameter baselines, same test split ---
+  protein_mean_lookup      R = 0.5784  RMSE = 1.2624  Spearman = 0.5610  R2 =  0.3339
+  ligand_mean_lookup       R = 0.1841  RMSE = 1.5409  Spearman = 0.1511  R2 =  0.0076
+  global_mean              R = 0.0000  RMSE = 1.5468  Spearman = 0.0000  R2 =     nan
+  >>> full seed 0 starting
+    ep   1  train_loss 0.7052  dev R 0.5886  best 0.5886  patience 0/6
+    ep   2  train_loss 0.6276  dev R 0.6175  best 0.6175  patience 0/6
+    ep   3  train_loss 0.5932  dev R 0.6348  best 0.6348  patience 0/6
+    ep   4  train_loss 0.5668  dev R 0.6515  best 0.6515  patience 0/6
+    ep   5  train_loss 0.5441  dev R 0.6631  best 0.6631  patience 0/6
+    ep   6  train_loss 0.5219  dev R 0.6686  best 0.6686  patience 0/6
+    ep   7  train_loss 0.5045  dev R 0.6814  best 0.6814  patience 0/6
+    ep   8  train_loss 0.4870  dev R 0.6855  best 0.6855  patience 0/6
+    ep   9  train_loss 0.4725  dev R 0.6896  best 0.6896  patience 0/6
+    ep  10  train_loss 0.4574  dev R 0.7002  best 0.7002  patience 0/6
+    ep  11  train_loss 0.4404  dev R 0.7021  best 0.7021  patience 0/6
+    ep  12  train_loss 0.4277  dev R 0.7084  best 0.7084  patience 0/6
+    ep  13  train_loss 0.4154  dev R 0.7084  best 0.7084  patience 0/6
+    ep  14  train_loss 0.4031  dev R 0.7080  best 0.7084  patience 1/6
+    ep  15  train_loss 0.3946  dev R 0.7137  best 0.7137  patience 0/6
+    ep  16  train_loss 0.3821  dev R 0.7133  best 0.7137  patience 1/6
+    ep  17  train_loss 0.3731  dev R 0.7176  best 0.7176  patience 0/6
+    ep  18  train_loss 0.3634  dev R 0.7186  best 0.7186  patience 0/6
+    ep  19  train_loss 0.3559  dev R 0.7167  best 0.7186  patience 1/6
+    ep  20  train_loss 0.3466  dev R 0.7185  best 0.7186  patience 2/6
+    ep  21  train_loss 0.3392  dev R 0.7268  best 0.7268  patience 0/6
+    ep  22  train_loss 0.3313  dev R 0.7280  best 0.7280  patience 0/6
+    ep  23  train_loss 0.3250  dev R 0.7246  best 0.7280  patience 1/6
+    ep  24  train_loss 0.3191  dev R 0.7276  best 0.7280  patience 2/6
+    ep  25  train_loss 0.3126  dev R 0.7284  best 0.7284  patience 0/6
+    ep  26  train_loss 0.3068  dev R 0.7331  best 0.7331  patience 0/6
+    ep  27  train_loss 0.3011  dev R 0.7347  best 0.7347  patience 0/6
+    ep  28  train_loss 0.2973  dev R 0.7362  best 0.7362  patience 0/6
+    ep  29  train_loss 0.2912  dev R 0.7324  best 0.7362  patience 1/6
+    ep  30  train_loss 0.2865  dev R 0.7328  best 0.7362  patience 2/6
+    ep  31  train_loss 0.2822  dev R 0.7330  best 0.7362  patience 3/6
+    ep  32  train_loss 0.2779  dev R 0.7306  best 0.7362  patience 4/6
+    ep  33  train_loss 0.2749  dev R 0.7386  best 0.7386  patience 0/6
+    ep  34  train_loss 0.2702  dev R 0.7348  best 0.7386  patience 1/6
+    ep  35  train_loss 0.2665  dev R 0.7358  best 0.7386  patience 2/6
+    ep  36  train_loss 0.2610  dev R 0.7395  best 0.7395  patience 0/6
+    ep  37  train_loss 0.2585  dev R 0.7359  best 0.7395  patience 1/6
+    ep  38  train_loss 0.2564  dev R 0.7353  best 0.7395  patience 2/6
+    ep  39  train_loss 0.2529  dev R 0.7344  best 0.7395  patience 3/6
+    ep  40  train_loss 0.2490  dev R 0.7344  best 0.7395  patience 4/6
+  full          seed 0  test R = 0.7430  RMSE = 1.0406  dev R = 0.7395  40 ep  1,478,273 params  771.2s
+
+======================================================================================
+ABLATION SUMMARY  (pooling=mean, 1 seed(s), max_epochs=40, 771s total)
+======================================================================================
+arm                      test R    RMSE   Spear       R2     params   R|seen  R|unseen
+full              0.7430         1.0406  0.7366   0.5474  1,478,273   0.7457    0.6445
+
+for reference: protein lookup table R = 0.5784, ligand lookup R = 0.1841
+               PLAPT's reported validation R = 0.683
+
+wrote -> results/ablation_mean_livedemo.csv
