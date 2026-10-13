@@ -78,7 +78,9 @@ def assign_clusters(cluster_of: dict, pairs: pd.DataFrame, dev_frac: float,
     pair_prot = pairs["prot_id"].to_numpy()
     pair_clu = np.array([cluster_of[p] for p in pair_prot])
     sizes = pd.Series(pair_clu).value_counts()          # pairs per cluster
-    clusters = sizes.index.to_numpy()
+    # .copy() because a pandas Index's .to_numpy() can return a read-only view,
+    # and rng.shuffle writes in place.
+    clusters = sizes.index.to_numpy().copy()
     rng.shuffle(clusters)
 
     n = len(pairs)
