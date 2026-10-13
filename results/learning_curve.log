@@ -1,0 +1,98 @@
+=== learning curve started 16:16:30 ===
+=== train_n = 20000   16:16:30 ===
+embeddings: prot (8638, 1024) float32, mol (182402, 768) float16  (pooling=mean)
+train 20,000  dev 18,000  test 20,000   |  test rows with an unseen protein: 1,454
+
+--- zero-parameter baselines, same test split ---
+  protein_mean_lookup      R = 0.5033  RMSE = 1.3476  Spearman = 0.4952  R2 =  0.2410
+  ligand_mean_lookup       R = 0.0613  RMSE = 1.5497  Spearman = 0.0518  R2 = -0.0038
+  global_mean              R = 0.0000  RMSE = 1.5469  Spearman = 0.0000  R2 =     nan
+  full          seed 0  test R = 0.5897  RMSE = 1.2757  dev R = 0.5890  25 ep  1,478,273 params   35.6s
+  full          seed 1  test R = 0.5897  RMSE = 1.2785  dev R = 0.5830  22 ep  1,478,273 params   33.3s
+  prot_zero     seed 0  test R = 0.5107  RMSE = 1.3400  dev R = 0.5068  39 ep  1,478,273 params   52.2s
+  prot_zero     seed 1  test R = 0.5101  RMSE = 1.3428  dev R = 0.5044  35 ep  1,478,273 params   50.4s
+
+======================================================================================
+ABLATION SUMMARY  (pooling=mean, 2 seed(s), max_epochs=60, 172s total)
+======================================================================================
+arm                      test R    RMSE   Spear       R2     params   R|seen  R|unseen
+full              0.5897 ▒0.0000  1.2771  0.5797   0.3184  1,478,273   0.5967    0.4678
+prot_zero         0.5104 ▒0.0004  1.3414  0.4945   0.2479  1,478,273   0.5210    0.3503
+
+for reference: protein lookup table R = 0.5033, ligand lookup R = 0.0613
+               PLAPT's reported validation R = 0.683
+
+wrote -> results/ablation_mean_curve20000.csv
+=== train_n = 40000   16:19:28 ===
+embeddings: prot (8638, 1024) float32, mol (182402, 768) float16  (pooling=mean)
+train 40,000  dev 18,000  test 20,000   |  test rows with an unseen protein: 981
+
+--- zero-parameter baselines, same test split ---
+  protein_mean_lookup      R = 0.5374  RMSE = 1.3089  Spearman = 0.5264  R2 =  0.2840
+  ligand_mean_lookup       R = 0.0943  RMSE = 1.5484  Spearman = 0.0745  R2 = -0.0021
+  global_mean              R = 0.0000  RMSE = 1.5468  Spearman = 0.0000  R2 =     nan
+  full          seed 0  test R = 0.6365  RMSE = 1.2073  dev R = 0.6325  29 ep  1,478,273 params   68.9s
+  full          seed 1  test R = 0.6419  RMSE = 1.2120  dev R = 0.6388  30 ep  1,478,273 params   77.4s
+  prot_zero     seed 0  test R = 0.5395  RMSE = 1.3040  dev R = 0.5310  44 ep  1,478,273 params  100.4s
+  prot_zero     seed 1  test R = 0.5353  RMSE = 1.3077  dev R = 0.5289  39 ep  1,478,273 params   96.9s
+
+======================================================================================
+ABLATION SUMMARY  (pooling=mean, 2 seed(s), max_epochs=60, 344s total)
+======================================================================================
+arm                      test R    RMSE   Spear       R2     params   R|seen  R|unseen
+full              0.6392 ▒0.0038  1.2097  0.6300   0.3884  1,478,273   0.6445    0.5246
+prot_zero         0.5374 ▒0.0030  1.3058  0.5210   0.2873  1,478,273   0.5448    0.3971
+
+for reference: protein lookup table R = 0.5374, ligand lookup R = 0.0943
+               PLAPT's reported validation R = 0.683
+
+wrote -> results/ablation_mean_curve40000.csv
+=== train_n = 80000   16:25:16 ===
+embeddings: prot (8638, 1024) float32, mol (182402, 768) float16  (pooling=mean)
+train 80,000  dev 18,000  test 20,000   |  test rows with an unseen protein: 675
+
+--- zero-parameter baselines, same test split ---
+  protein_mean_lookup      R = 0.5627  RMSE = 1.2804  Spearman = 0.5469  R2 =  0.3148
+  ligand_mean_lookup       R = 0.1380  RMSE = 1.5444  Spearman = 0.1072  R2 =  0.0030
+  global_mean              R = 0.0000  RMSE = 1.5468  Spearman = 0.0000  R2 =     nan
+  full          seed 0  test R = 0.6921  RMSE = 1.1292  dev R = 0.6881  44 ep  1,478,273 params  216.7s
+  full          seed 1  test R = 0.6823  RMSE = 1.1410  dev R = 0.6773  25 ep  1,478,273 params  108.5s
+  prot_zero     seed 0  test R = 0.5568  RMSE = 1.2861  dev R = 0.5445  35 ep  1,478,273 params  155.2s
+  prot_zero     seed 1  test R = 0.5564  RMSE = 1.2857  dev R = 0.5445  33 ep  1,478,273 params  162.9s
+
+======================================================================================
+ABLATION SUMMARY  (pooling=mean, 2 seed(s), max_epochs=60, 643s total)
+======================================================================================
+arm                      test R    RMSE   Spear       R2     params   R|seen  R|unseen
+full              0.6872 ▒0.0070  1.1351  0.6794   0.4614  1,478,273   0.6917    0.5662
+prot_zero         0.5566 ▒0.0003  1.2859  0.5384   0.3089  1,478,273   0.5610    0.4312
+
+for reference: protein lookup table R = 0.5627, ligand lookup R = 0.1380
+               PLAPT's reported validation R = 0.683
+
+wrote -> results/ablation_mean_curve80000.csv
+=== train_n = 120000   16:36:04 ===
+embeddings: prot (8638, 1024) float32, mol (182402, 768) float16  (pooling=mean)
+train 120,000  dev 18,000  test 20,000   |  test rows with an unseen protein: 553
+
+--- zero-parameter baselines, same test split ---
+  protein_mean_lookup      R = 0.5718  RMSE = 1.2699  Spearman = 0.5552  R2 =  0.3259
+  ligand_mean_lookup       R = 0.1625  RMSE = 1.5431  Spearman = 0.1328  R2 =  0.0047
+  global_mean              R = 0.0000  RMSE = 1.5468  Spearman = 0.0000  R2 =     nan
+  full          seed 0  test R = 0.7235  RMSE = 1.0747  dev R = 0.7214  42 ep  1,478,273 params  288.8s
+  full          seed 1  test R = 0.7227  RMSE = 1.0776  dev R = 0.7159  39 ep  1,478,273 params  269.2s
+  prot_zero     seed 0  test R = 0.5590  RMSE = 1.2831  dev R = 0.5495  23 ep  1,478,273 params  151.9s
+  prot_zero     seed 1  test R = 0.5620  RMSE = 1.2803  dev R = 0.5500  32 ep  1,478,273 params  231.0s
+
+======================================================================================
+ABLATION SUMMARY  (pooling=mean, 2 seed(s), max_epochs=60, 941s total)
+======================================================================================
+arm                      test R    RMSE   Spear       R2     params   R|seen  R|unseen
+full              0.7231 ▒0.0005  1.0762  0.7163   0.5159  1,478,273   0.7264    0.6192
+prot_zero         0.5605 ▒0.0021  1.2817  0.5426   0.3134  1,478,273   0.5644    0.4328
+
+for reference: protein lookup table R = 0.5718, ligand lookup R = 0.1625
+               PLAPT's reported validation R = 0.683
+
+wrote -> results/ablation_mean_curve120000.csv
+=== train_n = 162000   16:51:50 ===

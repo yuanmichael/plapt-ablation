@@ -42,10 +42,22 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=2101,
                     help="2101 is the seed baked into PLAPT's released model filename")
     ap.add_argument("--val-frac", type=float, default=0.10)
+    ap.add_argument("--raw", default=None, help="path to all.parquet")
+    ap.add_argument("--out", default=None,
+                    help="output dir. DEFAULTS TO data/processed, which OVERWRITES the "
+                         "200k tables. Pass a separate dir (e.g. data/processed_full) "
+                         "when preparing a different sample, so existing results and any "
+                         "derived split stay reproducible.")
     args = ap.parse_args()
 
+    global OUT, RAW
+    if args.out:
+        OUT = Path(args.out)
+    if args.raw:
+        RAW = Path(args.raw)
     rng = np.random.default_rng(args.seed)
     OUT.mkdir(parents=True, exist_ok=True)
+    print(f"raw: {RAW}\nout: {OUT}")
 
     df = pd.read_parquet(RAW, columns=["seq", "smiles_can", "neg_log10_affinity_M"])
     df = df.rename(columns={"smiles_can": "smiles", "neg_log10_affinity_M": "y"})

@@ -16,3 +16,7 @@ onnx
 onnxruntime==1.31.0
 transformers==5.19.0
 torch==2.14.1
+
+# Optional: only needed to run the GPU stages on Modal (see modal_app.py).
+# Nothing else in the repo imports it.
+modal==1.6.1

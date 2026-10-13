@@ -51,7 +51,7 @@ from scipy import stats
 ROOT = Path(__file__).resolve().parent.parent
 PROC = ROOT / "data" / "processed"
 
-PROT_DIM, MOL_DIM = 1024, 768
+PROT_DIM, MOL_DIM = 1024, 768   # overridden at run time from the cache
 BRANCH, HIDDEN, BOTTLENECK = 512, 512, 64
 DROPOUT, BN_EPS = 0.2, 1e-3   # both recovered from the ONNX graph
 
@@ -246,7 +246,21 @@ def main() -> None:
                     help="carved out of train, used ONLY for early stopping")
     ap.add_argument("--pooling", choices=["pooler", "mean"], default="pooler",
                     help="pooler = what PLAPT uses; mean = the free-upgrade variant")
+    ap.add_argument("--prot-tag", default="",
+                    help="which protein encoder cache to read, e.g. _esm650. Empty "
+                         "means prot_{pooling}.npy (the original ProtBERT run)")
     ap.add_argument("--arms", default="", help="comma-separated subset of arm names")
+    ap.add_argument("--proc", default=None,
+                    help="dir holding the parquet tables and .npy caches "
+                         "(default data/processed)")
+    ap.add_argument("--pairs", default="pairs.parquet",
+                    help="which pair table to use, e.g. pairs_clustered.parquet")
+    ap.add_argument("--meta", default="meta.json",
+                    help="matching metadata (target scaling differs per split)")
+    ap.add_argument("--train-n", type=int, default=0,
+                    help="cap the training set at N pairs (0 = use all). Dev and "
+                         "test are unaffected, so points are directly comparable. "
+                         "Subsets are nested across values.")
     ap.add_argument("--tag", default="", help="suffix for the output files, so a rerun "
                                               "does not clobber an earlier one")
     ap.add_argument("--log-epochs", action="store_true",
@@ -258,12 +272,18 @@ def main() -> None:
     if args.threads:
         torch.set_num_threads(args.threads)
 
-    meta = json.loads((PROC / "meta.json").read_text())
+    global PROC
+    if args.proc:
+        PROC = Path(args.proc)
+    print(f"data: {PROC}")
+    meta = json.loads((PROC / args.meta).read_text())
     y_mean, y_std = meta["y_mean"], meta["y_std"]
-    pairs = pd.read_parquet(PROC / "pairs.parquet")
+    pairs = pd.read_parquet(PROC / args.pairs)
 
     suffix = "pooler" if args.pooling == "pooler" else "mean"
-    prot_np = np.load(PROC / f"prot_{suffix}.npy")
+    # --prot-tag selects which protein encoder's cache to use, e.g. "_esm650".
+    # The ligand cache is shared: swapping the protein encoder does not change it.
+    prot_np = np.load(PROC / f"prot_{suffix}{args.prot_tag}.npy")
     mol_np = np.load(PROC / f"mol_{suffix}.npy")
     print(f"embeddings: prot {prot_np.shape} {prot_np.dtype}, "
           f"mol {mol_np.shape} {mol_np.dtype}  (pooling={args.pooling})")
@@ -271,6 +291,10 @@ def main() -> None:
     # on CPU is slower, not faster, and the gradients would be garbage.
     prot_emb = torch.from_numpy(prot_np.astype(np.float32))
     mol_emb = torch.from_numpy(mol_np.astype(np.float32))
+    # Different protein encoders have different widths (ProtBERT 1024, ESM-2 650M
+    # 1280, ESM-2 150M 640), so the branch input size follows the cache.
+    globals()["PROT_DIM"] = int(prot_np.shape[1])
+    globals()["MOL_DIM"] = int(mol_np.shape[1])
 
     # ------------------------------------------------- three splits, not two
     # Stage 1 made PLAPT's 90/10 train/val split. But we will consult the
@@ -280,14 +304,46 @@ def main() -> None:
     # original 10% as a test set that each arm is evaluated on exactly once.
     #
     # This is the difference between PLAPT's reported 0.683 and an honest number.
-    is_train = (pairs["split"] == "train").to_numpy()
-    tr_idx = np.flatnonzero(is_train)
-    rng = np.random.default_rng(meta["seed"])
-    shuf = rng.permutation(len(tr_idx))
-    n_dev = int(len(tr_idx) * args.dev_frac)
-    dev_idx = tr_idx[shuf[:n_dev]]
-    fit_idx = tr_idx[shuf[n_dev:]]
-    test_idx = np.flatnonzero(~is_train)
+    #
+    # If the pairs file already carries a "dev" split -- which pairs_clustered
+    # .parquet does -- use it verbatim instead of carving one out. Under a
+    # cluster split, carving dev randomly out of train would put homologs of the
+    # training proteins in dev, and early stopping would then be tuned against
+    # the very leakage the split exists to remove.
+    sv = set(pairs["split"].unique())
+    if "dev" in sv:
+        fit_idx = np.flatnonzero((pairs["split"] == "train").to_numpy())
+        dev_idx = np.flatnonzero((pairs["split"] == "dev").to_numpy())
+        test_idx = np.flatnonzero((pairs["split"] == "test").to_numpy())
+        print("using the pre-specified train/dev/test splits from the pairs file")
+    else:
+        is_train = (pairs["split"] == "train").to_numpy()
+        tr_idx = np.flatnonzero(is_train)
+        rng = np.random.default_rng(meta["seed"])
+        shuf = rng.permutation(len(tr_idx))
+        n_dev = int(len(tr_idx) * args.dev_frac)
+        dev_idx = tr_idx[shuf[:n_dev]]
+        fit_idx = tr_idx[shuf[n_dev:]]
+        test_idx = np.flatnonzero(~is_train)
+
+    # ------------------------------------------------------- learning curve
+    # --train-n truncates the TRAINING set only. Dev and test are untouched, so
+    # every point on the curve is scored on the identical 20,000 test pairs and
+    # stopped on the identical 18,000 dev pairs. Without that, each point would
+    # differ in training size AND test composition, and the curve would be
+    # uninterpretable.
+    #
+    # Because `shuf` is seeded from meta["seed"], the subsets are NESTED:
+    # the 25k set is a subset of the 50k set, and so on. That removes
+    # sample-composition noise between adjacent points -- the only thing that
+    # changes from one point to the next is that rows were added.
+    #
+    # The lookup baselines below are built from fit_idx too, so they shrink with
+    # the model. That is the control that matters: if the model's curve and the
+    # memorisation curve have the same shape, extra data is buying recall, not
+    # understanding.
+    if args.train_n and args.train_n < len(fit_idx):
+        fit_idx = fit_idx[:args.train_n]
 
     def pack(idx):
         return (torch.from_numpy(pairs["prot_id"].to_numpy()[idx].astype(np.int64)),

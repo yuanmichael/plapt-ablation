@@ -63,6 +63,43 @@ quantisation. So the big table (182,402 x 768) stays fp16 and we halve 560 MB to
 280 MB at no measurable cost.
 
 Precision is an experimental-design decision, not just a storage one.
+
+Per-residue mode (--save-residues)
+----------------------------------
+Everything above collapses each protein to one vector. A cross-attention head
+needs the uncollapsed grid: one row per residue, so a ligand atom can attend to
+residue 213 specifically. --save-residues keeps it.
+
+Three decisions, because the obvious implementation is 15x too big:
+
+1. RAGGED, NOT PADDED. Our proteins run from 9 to 7,182 residues (median 375).
+   A padded (8638, 7182, 640) array is 79.4 GB of which 93% is padding. We store
+   one concatenated (total_residues, hidden) array plus an int64 offsets table:
+   protein i occupies rows offsets[i] : offsets[i+1]. That is 5.4 GB at fp16.
+   Padding then happens per BATCH at training time, to the longest member of
+   that batch, not to the global maximum.
+
+2. REAL RESIDUES ONLY. [CLS]/[SEP] (ProtBERT) and <cls>/<eos> (ESM-2) are
+   dropped, so row r of a protein's slice is residue r of its sequence and the
+   consumer needs no knowledge of tokenizer conventions. This makes the row
+   count predictable -- min(seq_len, max_length - n_special) -- which is what
+   lets us preallocate the memmap and write into it as we go rather than
+   holding 5.4 GB in RAM.
+
+   We exclude only the STRUCTURAL specials (cls/bos/sep/eos/pad), never
+   unk/mask. Dropping an [UNK] would silently shift every subsequent residue by
+   one and misalign the whole protein, so the code asserts the actual row count
+   against the predicted one and fails loudly rather than writing corrupt data.
+
+3. fp16 IS SAFE HERE, unlike for pooler_output. The fp32 requirement above
+   exists because ProtBERT's pooler collapses: its 2nd component sits at 1e-3
+   of the 1st, exactly on the fp16 floor. last_hidden_state has no such problem
+   -- it is LayerNorm'd to roughly unit scale per dimension and has an effective
+   rank in the hundreds. Rather than assume that, the run ends by recomputing
+   the mean pool FROM the stored fp16 residues and correlating it against the
+   fp32 mean computed in the forward pass. That single check validates the
+   ragged layout, the offsets, the special-token masking and the precision all
+   at once; anything below r = 0.999 means something is wrong.
 """
 
 import argparse
@@ -74,7 +111,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from transformers import BertModel, BertTokenizer, RobertaModel, RobertaTokenizer
+from transformers import (AutoModel, AutoTokenizer, BertModel,
+                          BertTokenizerFast, RobertaModel, RobertaTokenizerFast)
 
 PROT_MODEL = "Rostlab/prot_bert"
 MOL_MODEL = "seyonec/ChemBERTa-zinc-base-v1"
@@ -82,21 +120,133 @@ PROT_MAX = 3200   # PLAPT's setting
 MOL_MAX = 278     # PLAPT's setting
 
 
-def prot_preprocess(seq: str) -> str:
-    """Exactly what plapt.py does: ambiguous residues -> X, then space-separate.
+def load_tokenizer(name: str):
+    """AutoTokenizer cannot resolve every older repo under transformers v5.
 
-    ProtBERT's vocabulary is one token per amino acid, so the tokenizer expects
-    "M A V L K" rather than "MAVLK". Forgetting the spaces is the classic
-    ProtBERT bug -- you get no error, just a sequence chopped into meaningless
-    multi-character word-pieces and embeddings that quietly mean nothing.
+    Rostlab/prot_bert ships a plain `vocab.txt` and no `tokenizer.json`, and
+    v5 removed the slow tokenizer classes, so AutoTokenizer fails with
+
+        ValueError: Couldn't instantiate the backend tokenizer from one of: ...
+        You need to have sentencepiece or tiktoken installed
+
+    Installing sentencepiece does not help (verified) -- the conversion path for
+    this repo is simply broken. Naming the concrete class works, because
+    BertTokenizerFast can build a WordPiece tokenizer from vocab.txt directly.
+    The original code called BertTokenizer explicitly, which is why switching to
+    AutoTokenizer introduced this.
+
+    Token ids are identical either way; only the loading path differs.
     """
+    attempts = [("AutoTokenizer", lambda: AutoTokenizer.from_pretrained(name, do_lower_case=False)),
+                ("BertTokenizerFast", lambda: BertTokenizerFast.from_pretrained(name, do_lower_case=False)),
+                ("RobertaTokenizerFast", lambda: RobertaTokenizerFast.from_pretrained(name))]
+    errors = []
+    for label, fn in attempts:
+        try:
+            tok = fn()
+            if label != "AutoTokenizer":
+                print(f"  (AutoTokenizer failed for {name}; loaded with {label})")
+            return tok
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}")
+    raise RuntimeError(f"could not load a tokenizer for {name} -- tried {', '.join(errors)}")
+
+
+def load_model(name: str):
+    """Same problem as load_tokenizer, one layer down.
+
+    Rostlab/prot_bert's config.json has no `model_type` key, so AutoModel cannot
+    work out which class to build and raises
+
+        ValueError: Unrecognized model in Rostlab/prot_bert.
+        Should have a `model_type` key in its config.json.
+
+    Naming BertModel explicitly works -- which is what the original code did.
+    ESM-2 and ChemBERTa declare model_type properly and go through AutoModel.
+    """
+    attempts = [("AutoModel", lambda: AutoModel.from_pretrained(name)),
+                ("BertModel", lambda: BertModel.from_pretrained(name)),
+                ("RobertaModel", lambda: RobertaModel.from_pretrained(name))]
+    errors = []
+    for label, fn in attempts:
+        try:
+            m = fn()
+            if label != "AutoModel":
+                print(f"  (AutoModel failed for {name}; loaded with {label})")
+            return m
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}")
+    raise RuntimeError(f"could not load a model for {name} -- tried {', '.join(errors)}")
+
+
+def prot_preprocess(seq: str, model_name: str) -> str:
+    """Tokenizer conventions differ between protein encoders, and getting this
+    wrong fails silently rather than loudly.
+
+    ProtBERT's vocabulary is one token per amino acid and its tokenizer splits on
+    whitespace, so it expects "M A V L K" rather than "MAVLK". Feed it an
+    unspaced sequence and you get no error -- just a chain chopped into
+    meaningless multi-character word-pieces and embeddings that quietly mean
+    nothing. plapt.py also maps the ambiguous residues U/Z/O/B to X.
+
+    ESM-2 tokenizes raw sequence directly and has its own vocabulary entries for
+    the ambiguous residues, so it wants the string untouched.
+
+    .upper() is NOT cosmetic. 29 of our 8,638 sequences arrive lowercase, and
+    both vocabularies are uppercase-only:
+
+      ESM-2:    the tokenizer splits on whitespace, and a lowercase sequence has
+                none, so the ENTIRE protein becomes a single <unk>. A 181-residue
+                protein encoded as one meaningless vector.
+      ProtBERT: we space out every character first, so each lowercase residue
+                becomes its own [UNK] -- 181 tokens, 181 of them garbage. The
+                token COUNT is right, which is why this went unnoticed: there was
+                no shape mismatch to trip over, only silently wrong content.
+
+    Uppercasing takes the total <unk> count across all 3.8M residues from
+    ~10,000 to 1 (a literal digit in one sequence labelled "biotin-C6linker-...",
+    which is a conjugate rather than a plain peptide).
+    """
+    seq = seq.upper()
+    if "esm" in model_name.lower():
+        return seq
     return " ".join(re.sub(r"[UZOB]", "X", seq))
+
+
+def count_residue_tokens(texts, tokenizer, max_length, struct_ids, preprocess=None,
+                         unk_id=None, batch=256):
+    """Exact non-special token count per sequence, by actually tokenising.
+
+    The earlier version predicted this as min(seq_len, max_length - n_special),
+    which assumes one token per character. That assumption is true for ProtBERT
+    and ESM-2 on clean uppercase input and false the moment it is not -- see
+    prot_preprocess. Predicting it meant the preallocated offsets could disagree
+    with reality, and the only thing standing between that and a silently
+    misaligned 9.75 GB cache was an assertion.
+
+    Tokenising twice costs seconds and removes the assumption. It also gives us
+    somewhere to count <unk>, which is the signal that a sequence was accepted
+    but not understood.
+    """
+    counts = np.zeros(len(texts), dtype=np.int64)
+    n_unk = 0
+    for i in range(0, len(texts), batch):
+        chunk = texts[i:i + batch]
+        if preprocess is not None:
+            chunk = [preprocess(t) for t in chunk]
+        enc = tokenizer(chunk, truncation=True, max_length=max_length)
+        for j, ids in enumerate(enc["input_ids"]):
+            counts[i + j] = sum(1 for t in ids if t not in struct_ids)
+            if unk_id is not None:
+                n_unk += sum(1 for t in ids if t == unk_id)
+    return counts, n_unk
 
 
 @torch.no_grad()
 def embed_table(texts, tokenizer, model, max_length, device, token_budget,
                 preprocess=None, desc="", ckpt_path=None, ckpt_every=50_000,
-                dtype=np.float16):
+                dtype=np.float16, exclude_special=False, special_ids=(),
+                res_arr=None, res_off=None, struct_ids=()):
     """Embed a list of strings, returning (pooler, meanpool) as float16 arrays.
 
     Length-sorted dynamic batching
@@ -146,14 +296,49 @@ def embed_table(texts, tokenizer, model, max_length, device, token_budget,
                             enabled=(device.type == "cuda")):
             out = model(**tok)
 
-        pooler[idx] = out.pooler_output.float().cpu().numpy().astype(dtype)
+        if getattr(out, "pooler_output", None) is not None:
+            pooler[idx] = out.pooler_output.float().cpu().numpy().astype(dtype)
 
         # Mean pooling MUST be mask-aware. Averaging over the padded positions
         # too would make a sequence's embedding depend on what else happened to
         # land in its batch -- a nasty, silent, batch-size-dependent bug.
-        mask = tok["attention_mask"].unsqueeze(-1).float()
+        #
+        # With exclude_special we also drop [CLS]/[SEP] (ProtBERT) and <cls>/<eos>
+        # (ESM-2), so the average is over real residues only. Different encoders
+        # add different numbers of special tokens, so leaving them in would make
+        # a cross-encoder comparison depend on tokenizer bookkeeping rather than
+        # on the models.
+        m = tok["attention_mask"].clone()
+        if exclude_special and special_ids:
+            for sid in special_ids:
+                m &= (tok["input_ids"] != sid)
+        mask = m.unsqueeze(-1).float()
         summed = (out.last_hidden_state.float() * mask).sum(dim=1)
-        meanp[idx] = (summed / mask.sum(dim=1)).cpu().numpy().astype(dtype)
+        meanp[idx] = (summed / mask.sum(dim=1).clamp(min=1)).cpu().numpy().astype(dtype)
+
+        # --------------------------------------------- per-residue grid
+        # Write each protein's real residue rows into its preallocated slice of
+        # the ragged array. `idx` is in length-sorted order but the offsets were
+        # computed in original row order, so the scatter lands correctly.
+        if res_arr is not None:
+            hs = out.last_hidden_state.float()
+            keep = tok["attention_mask"].bool()
+            for sid in struct_ids:
+                keep &= (tok["input_ids"] != sid)
+            for b, k in enumerate(idx):
+                rows = hs[b][keep[b]].cpu().numpy().astype(res_arr.dtype)
+                lo, hi = int(res_off[k]), int(res_off[k + 1])
+                if rows.shape[0] != hi - lo:
+                    # Never write misaligned data. If this fires, the predicted
+                    # token count disagrees with the tokenizer's actual output
+                    # and every residue after this protein would be shifted.
+                    raise RuntimeError(
+                        f"row {k}: tokenizer produced {rows.shape[0]} residue rows "
+                        f"but {hi - lo} were reserved. Predicted count is "
+                        f"min(seq_len, max_length - n_special); check whether this "
+                        f"tokenizer adds a different number of special tokens, or "
+                        f"emits more than one token per residue.")
+                res_arr[lo:hi] = rows
 
         done += len(idx)
         i = j
@@ -176,6 +361,25 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="smoke test: only N rows of each")
     ap.add_argument("--prot-budget", type=int, default=16_000, help="tokens per protein batch")
     ap.add_argument("--mol-budget", type=int, default=65_536, help="tokens per ligand batch")
+    ap.add_argument("--prot-model", default=PROT_MODEL,
+                    help="e.g. Rostlab/prot_bert, facebook/esm2_t33_650M_UR50D")
+    ap.add_argument("--prot-max", type=int, default=PROT_MAX,
+                    help="max protein tokens. PLAPT uses 3200; ESM-2 was trained at 1024")
+    ap.add_argument("--tag", default="",
+                    help="suffix for the protein output files, so several encoders "
+                         "can be cached side by side (e.g. _esm650)")
+    ap.add_argument("--skip-ligands", action="store_true",
+                    help="ligand embeddings do not change when only the protein "
+                         "encoder is swapped; skip to save ~3 min per run")
+    ap.add_argument("--save-residues", action="store_true",
+                    help="also save the uncollapsed per-residue grid, ragged, as "
+                         "prot_residues{tag}.npy + prot_offsets{tag}.npy. Needed "
+                         "for a cross-attention head. ~5.4 GB at prot_max=3200, "
+                         "~4.9 GB at 1024 (see module docstring)")
+    ap.add_argument("--exclude-special", action="store_true",
+                    help="exclude [CLS]/[SEP]/<cls>/<eos> from the mean pool. Required "
+                         "for a fair comparison ACROSS encoders, since they add "
+                         "different special tokens")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -203,41 +407,128 @@ def main() -> None:
     # Done first: it is the big table but the small model, so it is the fast
     # confidence-builder. If something is wrong with the pipeline you find out
     # in two minutes instead of twenty.
-    print(f"\nloading {MOL_MODEL}")
-    mol_tok = RobertaTokenizer.from_pretrained(MOL_MODEL)
-    mol_model = RobertaModel.from_pretrained(MOL_MODEL).to(device).eval()
-    mp, mm = embed_table(ligands["smiles"].tolist(), mol_tok, mol_model, MOL_MAX,
-                         device, args.mol_budget, desc="ligand",
-                         ckpt_path=out / "mol_pooler.partial.npy",
-                         dtype=np.float16)   # safe: see module docstring
-    np.save(out / "mol_pooler.npy", mp)
-    np.save(out / "mol_mean.npy", mm)
-    print(f"  wrote mol_pooler.npy {mp.shape} + mol_mean.npy {mm.shape}")
-    del mol_model
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    mp = mm = None
+    if not args.skip_ligands:
+        print(f"\nloading {MOL_MODEL}")
+        mol_tok = load_tokenizer(MOL_MODEL)
+        mol_model = load_model(MOL_MODEL).to(device).eval()
+        mp, mm = embed_table(ligands["smiles"].tolist(), mol_tok, mol_model, MOL_MAX,
+                             device, args.mol_budget, desc="ligand",
+                             ckpt_path=out / "mol_pooler.partial.npy",
+                             dtype=np.float16,   # safe: see module docstring
+                             exclude_special=args.exclude_special,
+                             special_ids=set(mol_tok.all_special_ids))
+        np.save(out / "mol_pooler.npy", mp)
+        np.save(out / "mol_mean.npy", mm)
+        print(f"  wrote mol_pooler.npy {mp.shape} + mol_mean.npy {mm.shape}")
+        del mol_model
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        print("\nskipping ligands (--skip-ligands); they do not change when only "
+              "the protein encoder is swapped")
 
     # ------------------------------------------------------------- proteins
-    print(f"\nloading {PROT_MODEL}")
-    prot_tok = BertTokenizer.from_pretrained(PROT_MODEL, do_lower_case=False)
-    prot_model = BertModel.from_pretrained(PROT_MODEL).to(device).eval()
-    pp, pm = embed_table(proteins["seq"].tolist(), prot_tok, prot_model, PROT_MAX,
-                         device, args.prot_budget, preprocess=prot_preprocess,
-                         desc="protein", ckpt_path=out / "prot_pooler.partial.npy",
-                         dtype=np.float32)   # fp16 would destroy components 2+
-    np.save(out / "prot_pooler.npy", pp)
-    np.save(out / "prot_mean.npy", pm)
-    print(f"  wrote prot_pooler.npy {pp.shape} + prot_mean.npy {pm.shape}")
+    print(f"\nloading {args.prot_model}  (max_length={args.prot_max})")
+    prot_tok = load_tokenizer(args.prot_model)
+    prot_model = load_model(args.prot_model).to(device).eval()
+    tag = args.tag
+
+    # -------------------------------------------- per-residue preallocation
+    res_arr = res_off = struct_ids = None
+    if args.save_residues:
+        # Only the structural specials. unk/mask are NOT excluded -- see docstring.
+        struct_ids = {getattr(prot_tok, a + "_token_id", None)
+                      for a in ("cls", "bos", "sep", "eos", "pad")}
+        struct_ids = {s for s in struct_ids if s is not None}
+        print("  counting residue tokens...", flush=True)
+        rows_per, n_unk = count_residue_tokens(
+            proteins["seq"].tolist(), prot_tok, args.prot_max, struct_ids,
+            preprocess=lambda s: prot_preprocess(s, args.prot_model),
+            unk_id=prot_tok.unk_token_id)
+        res_off = np.zeros(len(proteins) + 1, dtype=np.int64)
+        np.cumsum(rows_per, out=res_off[1:])
+        total = int(res_off[-1])
+        hidden = int(prot_model.config.hidden_size)
+        gb = total * hidden * 2 / 1e9
+        print(f"  per-residue: {total:,} residues x {hidden} @ fp16 = {gb:.2f} GB")
+        # A sequence the tokenizer accepted but did not understand produces a
+        # valid-looking embedding of nothing. Loud is better than silent.
+        if n_unk:
+            frac = n_unk / max(total, 1) * 100
+            flag = "  <-- INVESTIGATE" if frac > 0.1 else ""
+            print(f"  {n_unk:,} <unk> tokens ({frac:.3f}% of residues){flag}")
+        # open_memmap writes a real .npy header, so the file is loadable with a
+        # plain np.load(..., mmap_mode='r') later. Streaming into it keeps peak
+        # RAM at one batch rather than the whole 5 GB.
+        res_arr = np.lib.format.open_memmap(
+            out / f"prot_residues{tag}.npy", mode="w+",
+            dtype=np.float16, shape=(total, hidden))
+        np.save(out / f"prot_offsets{tag}.npy", res_off)
+
+    pp, pm = embed_table(proteins["seq"].tolist(), prot_tok, prot_model, args.prot_max,
+                         device, args.prot_budget,
+                         preprocess=lambda s: prot_preprocess(s, args.prot_model),
+                         desc="protein", ckpt_path=out / f"prot_pooler{tag}.partial.npy",
+                         dtype=np.float32,   # fp16 would destroy components 2+
+                         exclude_special=args.exclude_special,
+                         special_ids=set(prot_tok.all_special_ids),
+                         res_arr=res_arr, res_off=res_off, struct_ids=struct_ids)
+    np.save(out / f"prot_pooler{tag}.npy", pp)
+    np.save(out / f"prot_mean{tag}.npy", pm)
+    print(f"  wrote prot_pooler{tag}.npy {pp.shape} + prot_mean{tag}.npy {pm.shape}")
+
+    # ------------------------------------------- per-residue integrity check
+    # Recompute the mean pool from the stored fp16 ragged array and correlate it
+    # against the fp32 mean computed during the forward pass. One number that
+    # validates the layout, the offsets, the special-token masking and the
+    # precision simultaneously. It is only an exact comparison when
+    # --exclude-special is set; otherwise pm includes [CLS]/[SEP] and the two
+    # means are legitimately different, so we only warn.
+    if res_arr is not None:
+        res_arr.flush()
+        print(f"  wrote prot_residues{tag}.npy {res_arr.shape} + "
+              f"prot_offsets{tag}.npy ({len(res_off):,},)")
+        rec = np.zeros_like(pm, dtype=np.float64)
+        for i in range(len(proteins)):
+            lo, hi = int(res_off[i]), int(res_off[i + 1])
+            rec[i] = res_arr[lo:hi].astype(np.float64).mean(axis=0)
+        r = float(np.corrcoef(rec.ravel(), pm.astype(np.float64).ravel())[0, 1])
+        mad = float(np.abs(rec - pm.astype(np.float64)).max())
+        print(f"  integrity: mean-from-residues vs fp32 mean  "
+              f"r = {r:.6f}   max|diff| = {mad:.2e}")
+        if not args.exclude_special:
+            print("    (approximate: pm includes [CLS]/[SEP] but the residue grid "
+                  "does not. Re-run with --exclude-special for an exact match.)")
+        elif r < 0.999:
+            raise RuntimeError(
+                f"per-residue integrity check FAILED: r = {r:.6f} < 0.999. The "
+                f"ragged array, the offsets or the special-token masking is wrong. "
+                f"Do not use prot_residues{tag}.npy.")
+
+    n_trunc = int((proteins["seq_len"] > args.prot_max - 2).sum())
+    if n_trunc:
+        print(f"  NOTE: {n_trunc:,} / {len(proteins):,} proteins "
+              f"({n_trunc/len(proteins)*100:.1f}%) exceed max_length and were truncated")
 
     # Record what produced these vectors. Future-you will want to know whether a
     # cache on disk came from pooler or mean, fp16 or fp32, which max_length.
-    (out / "embed_meta.json").write_text(json.dumps({
-        "prot_model": PROT_MODEL, "mol_model": MOL_MODEL,
-        "prot_max_length": PROT_MAX, "mol_max_length": MOL_MAX,
+    (out / f"embed_meta{tag}.json").write_text(json.dumps({
+        "prot_model": args.prot_model, "mol_model": MOL_MODEL,
+        "prot_max_length": args.prot_max, "mol_max_length": MOL_MAX,
+        "prot_hidden": int(pp.shape[1]),
         "n_proteins": int(len(proteins)), "n_ligands": int(len(ligands)),
         "prot_dtype": "float32", "mol_dtype": "float16",
         "poolings": ["pooler_output", "masked_mean"],
-        "device": str(device), "limit": args.limit,
+        "exclude_special_from_mean": bool(args.exclude_special),
+        "n_proteins_truncated": n_trunc,
+        "device": str(device), "limit": args.limit, "tag": tag,
+        "residues_saved": bool(args.save_residues),
+        "n_residues": int(res_off[-1]) if res_off is not None else 0,
+        "residue_dtype": "float16" if args.save_residues else None,
+        "residue_layout": ("ragged: prot_residues[offsets[i]:offsets[i+1]] is "
+                           "protein i, one row per residue, specials removed"
+                           if args.save_residues else None),
     }, indent=2))
 
     # A frozen encoder that emits near-identical vectors for every input would
@@ -249,8 +540,13 @@ def main() -> None:
     # eigenvalues of the centred covariance. A value near 1 means every input is
     # mapped onto a single line -- the representation has collapsed.
     print("\n--- representation health check ---")
-    for name, arr in [("prot_pooler", pp), ("prot_mean", pm),
-                      ("mol_pooler", mp), ("mol_mean", mm)]:
+    checks = [(f"prot_pooler{tag}", pp), (f"prot_mean{tag}", pm)]
+    if mp is not None:
+        checks += [("mol_pooler", mp), ("mol_mean", mm)]
+    for name, arr in checks:
+        if arr is None or not np.abs(arr).sum():
+            print(f"  {name:16s} (all zeros -- this model exposes no pooler_output)")
+            continue
         a = arr.astype(np.float64)
         sub = a if len(a) <= 4000 else a[np.random.default_rng(0).choice(len(a), 4000, False)]
         X = sub - sub.mean(0)
