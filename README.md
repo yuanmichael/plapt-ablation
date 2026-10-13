@@ -13,9 +13,6 @@ explorations — and the two that didn't work are informative.
 | **2.** swap ProtBERT → ESM-2 650M (4.3× larger encoder) | **−0.006** |
 | **3.** replace concatenation with cross-attention | **+0.014** |
 
-PLAPT had one meaningful bug with the pooling layer. Past that, it is constrained by its labels
-and the structure of its data — not by its architecture.
-
 All numbers below are internal comparisons; none should be read against the
 paper's reported figures (see [Caveats](#caveats)).
 
