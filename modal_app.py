@@ -47,7 +47,9 @@ vol = modal.Volume.from_name("plapt-cache", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch", "transformers", "numpy", "pandas", "pyarrow", "psutil")
+    .pip_install("torch", "transformers", "numpy", "pandas", "pyarrow", "psutil",
+                 # 03_train_ablation.py imports scipy for Spearman; 06 does not.
+                 "scipy")
     # Mounted at runtime, so editing a script locally takes effect on the next
     # `modal run` with no image rebuild.
     .add_local_file("scripts/01_prepare_data.py", "/app/01_prepare_data.py")

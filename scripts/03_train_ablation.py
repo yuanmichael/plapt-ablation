@@ -225,11 +225,19 @@ def run_arm(arm, data, seed, args):
     # the model never saw during training.
     seen = splits["seen_prot_mask"]
     for label, mask in (("seen_prot", seen), ("unseen_prot", ~seen)):
+        # Always define the columns, even when the subgroup is empty. Under a
+        # cluster split EVERY test protein is unseen, so "seen_prot" has zero
+        # rows -- and a missing column makes the summary aggregation raise
+        # KeyError after all the training has already finished.
         if mask.sum() >= 3:
             sub = metrics(pred_test[mask], true_test[mask])
             res[f"r_{label}"] = sub["r"]
             res[f"rmse_{label}"] = sub["rmse"]
             res[f"n_{label}"] = sub["n"]
+        else:
+            res[f"r_{label}"] = float("nan")
+            res[f"rmse_{label}"] = float("nan")
+            res[f"n_{label}"] = int(mask.sum())
     return res
 
 
