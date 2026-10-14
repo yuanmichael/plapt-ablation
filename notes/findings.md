@@ -369,13 +369,136 @@ Each branch does the easiest thing its data permits.
 `R|unseen` is a weak remedy: "unseen" means exact string mismatch, so a 99%-identical
 homolog still counts as unseen.
 
-## 12. Next steps, in priority order
+## 12. Cluster split at 30% identity — `07_cluster_split.py`
 
-1. **Cluster split at 30% sequence identity.** The blocker on interpreting everything
-   above. MMseqs2 `easy-cluster --min-seq-id 0.3 -c 0.8`, then assign whole clusters to
-   train/test so no test protein has a close relative in training. Registered prediction:
-   `full` falls from ~0.75 toward the ligand-only floor of ~0.55.
-2. **Richer supervision than one scalar.** The loss currently compares one predicted
+The test §11 said was the blocker. MMseqs2 `easy-cluster --min-seq-id 0.3 -c 0.8`, whole
+clusters assigned to train/dev/test by pair count. Dev is cluster-disjoint from train too,
+or early stopping would be tuned on homologs and stop too late.
+
+On the 200k sample: 3,093 clusters from 8,638 proteins, 2.79 proteins/cluster, 58.3%
+singletons. Train 159,765 pairs / 2,470 clusters · dev 20,175 / 355 · test 20,060 / 268.
+
+The split is clean on the one check that matters: **0.00%** of test pairs have a protein
+seen in training (was 97.66%), and the protein lookup table collapses from R = 0.5784 to
+**exactly 0.0000** — it has nothing to look up. Ligand lookup falls 0.1841 → 0.1281 at
+8.10% coverage.
+
+| arm | random split | cluster split |
+|---|---|---|
+| `full` | 0.7414 ±0.0017 | **0.3708** ±0.0262 |
+| `mol_zero` (ligand only) | 0.5507 | 0.3788 ±0.0117 |
+| `prot_zero` (protein only) | 0.5689 | 0.0706 ±0.0157 |
+| protein lookup table | 0.5784 | 0.0000 |
+| | | |
+| **protein's contribution** | **+0.1907** | **−0.0080** |
+
+Mean pooling's +0.19 was the headline result of §7. Under a split that forbids
+recognising the protein, it is **−0.008** — `full` does not beat ligand-only, and the
+ligand-only arm is nominally the higher of the two. The protein branch's entire measured
+value was recalling the average affinity of families it had already seen.
+
+Per seed, `full` ran 0.3689 / 0.3397 / 0.4039. The spread is **15× wider** than under the
+random split (±0.0262 vs ±0.0017), because the unit of variance is now the protein family
+and test holds only 268 of them. Quote this as "roughly 0.37". Early stopping also fires
+at 7–22 epochs rather than 32–44 — there is far less to fit.
+
+Registered prediction was `full` → ~0.55, the ligand-only floor. Direction right,
+magnitude wrong: it fell to 0.37 because **the floor dropped too**. Removing homologs
+hurts the ligand branch as well, since a ligand's affinity depends on which protein it is
+measured against.
+
+`prot_zero` at 0.0706 against a lookup baseline of 0.0000 is the one positive: frozen
+ProtBERT transfers a small but non-zero amount to families it has never seen.
+
+### A dev/test gap that is not overfitting
+
+Under this split dev R consistently sits above test R — 0.4599 vs 0.3559 on the full-data
+run below, and 0.27–0.30 vs 0.05–0.09 for `prot_zero` at 200k. Neither is a training
+score; both sets are cluster-disjoint from train. Two causes, both structural:
+
+1. **Dev is selected on, test is scored once.** Early stopping takes the best of N epochs
+   on dev, so dev is a maximum over N noisy draws. It is not an unbiased estimate of
+   anything.
+2. **The unit of variance is the family.** Dev and test hold different protein families,
+   and families differ widely in predictability. Effective n for the error bar is the
+   cluster count (458 in the full run), not the pair count (164,226).
+
+Both effects were invisible under the random split, where dev and test were draws from
+the same proteins. The split change exposed them.
+
+## 13. All 1,569,572 pairs — does more data fix it?
+
+§9's learning curve was still linear at 162k with no saturation, so this was the obvious
+remaining lever. ProtBERT + ChemBERTa, pooled, mean pooling, PLAPT's exact head. 7.8× the
+training data of every number above.
+
+**Random split** (3 seeds, `full`; 1 seed, `mol_zero`):
+
+| | 162k train | 1.27M train |
+|---|---|---|
+| `full` | 0.7414 ±0.0017 | **0.8325** ±0.0010 |
+| `mol_zero` (ligand only) | 0.5507 | 0.6720 |
+| protein lookup table | 0.5784 | 0.5910 |
+| ligand lookup table | 0.1841 | 0.3852 |
+
++0.091, and the curve is finally bending: `R ≈ 0.590 + 0.050 × log₂(n/20,000)`
+extrapolates to 0.89 at 1.27M, so the fit overshoots by 0.057. Still climbing, no longer
+log-linear.
+
+Provenance note: this run was stopped by hand after the three `full` seeds and one
+`mol_zero` seed, since `03_train_ablation.py` writes its CSV only after every arm
+finishes. So these four numbers come from the Modal job log, not from
+`results/ablation_mean_full.csv`, which does not exist. The clustered run below completed
+and did write `results/ablation_mean_full_clustered.csv`.
+
+**Cluster split, same data** — re-clustered over all 22,974 proteins: 5,047 clusters,
+4.55 proteins/cluster, 47.9% singletons, largest 659. Train 1,247,776 pairs / 18,362
+proteins / 3,939 clusters · dev 157,570 / 2,909 / 650 · test 164,226 / 1,703 / 458.
+Leakage 0, test pairs with a seen protein 0.00%, protein lookup 0.0000, ligand lookup
+0.2530 at 34.66% coverage.
+
+| | 200k clustered | full clustered |
+|---|---|---|
+| train pairs | 159,765 | 1,247,776 (**7.8×**) |
+| train clusters | 2,470 | 3,939 (**1.6×**) |
+| `full` | 0.3708 ±0.0262 | **0.3559** (1 seed) |
+| epochs to stop | 7–22 | 11 |
+
+0.3559 falls inside the 200k seed spread of 0.3397–0.4039. **7.8× the data moved nothing
+measurable.** The same data on the random split moved `full` by +0.091.
+
+The clustering output explains it. 2.66× the proteins produced only **1.63×** the
+clusters, and proteins per cluster rose from 2.79 to 4.55. The unused 1.37M pairs are
+mostly more members of families the 200k sample already contained.
+
+> The entire gain from 7.8× more data was more memorisable protein families, not better
+> binding prediction.
+
+This is the sharpest form of §12's result, and it reframes §9: that learning curve was
+measuring how fast the model acquires protein priors, not how fast it learns to bind.
+Both levers we had — more data and a better encoder (§8) — act on a branch whose
+contribution under an honest split is approximately zero.
+
+### Why the remaining interventions were not run
+
+- **ESM-2 on the clustered split.** The cluster split is the one regime where a better
+  protein encoder could pay, since the branch must now transfer rather than recall. But
+  at 200k, clustered `full` (0.3708) did not beat clustered ligand-only (0.3788): the
+  protein branch contributes nothing to beat. Upgrading an encoder feeding a dead branch
+  has no mechanism by which to help. The informative arm would be `prot_zero` alone
+  (0.0706 → ?), not `full`.
+- **Cross-attention on the clustered split.** §10 measured cross-attention as a *better
+  memoriser*: R|seen +0.0155, R|unseen **−0.0255**. A cluster split is 100% unseen, so
+  the expected result is a decline already measured. It is also infeasible at full scale
+  — 21.9 GB protein + 60.6 GB ligand per-token caches.
+
+## 14. Next steps, in priority order
+
+1. ~~**Cluster split at 30% sequence identity.**~~ Done — §12. `full` 0.7414 → 0.3708,
+   and the protein branch's contribution goes to zero.
+2. ~~**More data.**~~ Done — §13. 7.8× the pairs is +0.091 on the random split and
+   nothing at all on the clustered one.
+3. **Richer supervision than one scalar.** The loss currently compares one predicted
    number to one measured number. AlphaFold 2's distogram term instead predicts a
    distribution over the distance between *every residue pair* and grades it against the
    crystal structure — order 10⁵ supervised quantities per example rather than 1. The
@@ -386,10 +509,14 @@ homolog still counts as unseen.
    lists, which require sequence→PDB mapping. Note that ESM-2's own `predict_contacts()`
    is free but **circular** — those contacts are derived from the attention that produced
    our cached embeddings, so it adds no information.
-3. **Regularisation.** Weight decay and attention dropout are both zero. Cheap, and the
+4. **Regularisation.** Weight decay and attention dropout are both zero. Cheap, and the
    0.31 train/dev gap is the textbook signature.
-4. **More data.** The curve is still linear at 162k. But 49.4% of unused proteins are
-   singletons, so added pairs buy ligand coverage rather than protein diversity.
+
+§12 and §13 reorder this list. Items 1 and 2 are the cheap levers and both are now spent:
+the protein branch does not generalise to unseen families, and neither more data nor a
+larger encoder changes that, because neither supplies the missing information. Item 3 is
+the only remaining intervention with a mechanism — it would tell the model *where on the
+protein* to look, which is the one thing a single scalar label cannot.
 
 ### The label is itself a collapsed representation
 
@@ -414,24 +541,30 @@ Implication: the ~0.91 correlation ceiling is not purely physical. A model given
 type as a feature, or trained per assay, would face a higher ceiling, because it would no
 longer be asked to predict a quantity that is not well defined.
 
-## 13. Limitations
+## 15. Limitations
 
-- **200,000 pairs**, ~13% of the 1.57M available.
+- **§5–§11 use 200,000 pairs**, ~13% of the 1.57M available, on a random split. §12 adds
+  the cluster split; §13 adds the full data.
 - **Not a reproduction of the paper's numbers.** 0.5066 is not comparable to their 0.683:
   different data volume, deduplication, and a clean test split. Every comparison here is
   internal — same data, same split, same code, same seeds, one variable changed.
-- **One random split**, in which 97.66% of test pairs have a protein the model trained on
-  (§11). A cluster-based split at 30% sequence identity is the test that matters, and every
-  number here would drop under it. `R | unseen` is a weak proxy: 469 rows, and "unseen" is
-  exact string mismatch, so homologs leak.
+- **§5–§11 use one random split**, in which 97.66% of test pairs have a protein the model
+  trained on (§11). §12 shows how much that gave away: every number in those sections
+  roughly halves under a 30%-identity cluster split. `R | unseen` is a weak proxy for it —
+  469 rows, and "unseen" is exact string mismatch, so homologs leak.
+- **The clustered numbers are one seed (full data) or three (200k), and the seed spread is
+  ±0.026.** Read them to two decimal places, not four. Test holds 458 clusters, which is
+  the effective sample size.
 - **29 of 8,638 sequences were lowercase**, and both vocabularies are uppercase-only. ESM-2
   turned each whole sequence into a single `<unk>`; ProtBERT, which sees one spaced
   character per residue, produced one `[UNK]` per residue — correct token count, wrong
   content, no error raised. So every number in §5–§10 includes 29 proteins encoded as
   garbage (0.34% of proteins, ~0.33% of pairs — below the resolution of the reported R).
   Fixed in `02_embed.py` after the per-residue work tripped a row-count assertion.
-- **The mean-pooled head is not a shippable replacement.** The finding is supported; a
-  model release would need full-data training.
+- **The mean-pooled head is not a shippable replacement.** The pooling finding is
+  supported, and §13 trains it on the full data — but §12 shows the gain it measures is
+  largely recognition of seen families, so the honest headline for a release would be the
+  clustered number, not 0.8325.
 - **An earlier claim here that PLAPT "cannot distinguish two proteins" was retracted**
   after §6. Cosine ignores magnitude; vector lengths vary 31% and a Linear layer reads
   them. The defensible claim is a coarse global prior, not a recognition mechanism.

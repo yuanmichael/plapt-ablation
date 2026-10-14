@@ -12,9 +12,11 @@ explorations — and the two that didn't work are informative.
 | **1.** fix a collapsed pooling layer | **+0.23** |
 | **2.** swap ProtBERT → ESM-2 650M (4.3× larger encoder) | **−0.006** |
 | **3.** replace concatenation with cross-attention | **+0.014** |
+| **4.** re-test all of the above on an honest split | **−0.37** |
 
 All numbers below are internal comparisons; none should be read against the
-paper's reported figures (see [Caveats](#caveats)).
+paper's reported figures (see [Caveats](#caveats)). Experiment 4 is the one that
+reframes the first three.
 
 ---
 
@@ -104,7 +106,31 @@ Instead, the model is likely memorizing the training data better, but not really
 We think it's because 1) our training data is limited (we used 200K pairs out of the full ~1.5M), and 2) the output of PLAPT is 1 scalar number, the binding affinity. That may be compressing a lot of information into 1 scalar.
 See the "Planned Next" section for next experiments
 
+## 4. Most of the score was the split, and more data didn't help
 
+Two closing runs. First, replacing the random split with a **30% sequence-identity cluster
+split** (MMseqs2, whole protein families to train/dev/test, so no test protein has a close
+relative in training). Then **scaling from 200k to all 1.57M pairs**.
+
+| | random split | cluster split |
+|---|---|---|
+| `full`, 200k | 0.7414 | **0.3708** |
+| `full`, 1.57M | 0.8325 | **0.3559** |
+| protein lookup table | 0.5784 | 0.0000 |
+
+The score roughly halves under the cluster split, and the protein branch's +0.19
+contribution from #1 becomes **−0.008** — `full` no longer beats a ligand-only model.
+Scaling the data 7.8× is worth +0.09 on the random split and **nothing** on the clustered
+one: 2.66× more proteins gave only 1.63× more families, so the extra pairs are mostly more
+members of families already present.
+
+So the protein branch's measured value was recognising families it had seen, and neither
+more data nor a bigger encoder (#2) changes that, because neither supplies what's missing.
+Details and caveats in [`notes/findings.md`](notes/findings.md) §12–§13 — the clustered
+numbers carry a ±0.026 seed spread, so read them to two decimals.
+
+**This is where the experiment closes.** The one remaining idea with a mechanism is
+"Planned next" #2 below: richer supervision than a single scalar.
 
 ## Reproducing
 
@@ -172,24 +198,22 @@ be compared against their `0.683`:
   a correlation ceiling near 0.91, not 1.0.)
 - **Three splits, not two.** Dev is used for early stopping; test is scored once. PLAPT's
   0.683 is a best-epoch validation score.
-- **One random split**, in which 97.66% of test pairs have a protein the model trained on.
-  A cluster split at 30% sequence identity is the test that matters, and every number here
-  would drop under it. `R|unseen` is a weak proxy: 469 rows, and "unseen" means exact
-  string mismatch, so homologs leak.
-- **The mean-pooled head is not a shippable replacement for PLAPT.** Trained on 13% of the
-  data. The finding is supported; a model release would need the full set.
+- **Experiments 1–3 use one random split**, in which 97.66% of test pairs have a protein
+  the model trained on. #4 measures what that gave away: those numbers roughly halve under
+  a 30% cluster split. `R|unseen` is a weak proxy for it — 469 rows, and "unseen" means
+  exact string mismatch, so homologs leak.
+- **The mean-pooled head is not a shippable replacement for PLAPT.** The pooling finding
+  holds, but #4 shows most of what it gains is family recognition, so the honest number
+  for a release is the clustered one.
 - **The label is itself a collapsed representation.** The source dataset has no assay-type
   column — Ki, Kd, IC50 and EC50 are pooled into one scalar before we see it. Part of that
   0.62 "noise floor" is definitional heterogeneity, not measurement error.
 
 ## Planned next
 
-**1. Cluster split at 30% sequence identity.** The blocker on interpreting everything
-above. Under the current random split over pairs, **97.66% of test pairs have a protein
-the model trained on**, in a median of 168 other pairs — so a model can score well by
-memorizing a protein's average affinity. Implemented in `scripts/07_cluster_split.py`
-(MMseqs2, whole clusters to train/dev/test). Registered prediction: `full` falls from
-~0.75 toward the ligand-only floor of ~0.55.
+**1. ~~Cluster split at 30% sequence identity.~~ Done — see #4 above.** The registered
+prediction was `full` falling from ~0.75 toward the ligand-only floor of ~0.55. Direction
+right, magnitude wrong: 0.3708, because removing homologs lowers the ligand floor too.
 
 **2. Richer supervision than a single scalar.** The loss currently compares one predicted
 number to one measured number. AlphaFold 2's distogram term instead predicts a
@@ -207,9 +231,10 @@ structure-aware affinity prediction trained with exactly this kind of richer sup
 **PLINDER** and **LP-PDBbind** exist specifically because the field concluded that random
 splits over protein–ligand pairs leak.
 
-**3. Full 1.57M pairs.** The learning curve is still linear at 162k
-(`R ≈ 0.590 + 0.050 × log₂(n/20,000)`, no saturation). Cheap for the pooled/concat
-pipeline; expensive for cross-attention, which would need a 60.6 GB per-atom ligand cache.
+**3. ~~Full 1.57M pairs.~~ Done — see #4 above.** +0.09 on the random split, nothing on the
+clustered one. Cross-attention at that scale remains infeasible (a 60.6 GB per-atom ligand
+cache), and #3 of our findings predicts it would do worse under a cluster split anyway,
+since it was measured as the better *memoriser*.
 
 ## Acknowledgements
 

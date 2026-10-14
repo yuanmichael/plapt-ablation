@@ -111,7 +111,30 @@ protein-only arm. Ligand lookup 0.1841.
 
 Learning curve, `full`, mean pooling: `R ≈ 0.590 + 0.050 × log2(n/20000)`,
 still climbing at 162k with no saturation. The protein-only arm *is* saturated
-and tracks the lookup table to within 0.008 at every size.
+and tracks the lookup table to within 0.008 at every size. At 1.27M train the fit
+overshoots (predicts 0.89, observed 0.8325), so it does finally bend.
+
+Cluster split, mmseqs2 `--min-seq-id 0.3 -c 0.8` (`full`, mean pooling):
+
+| | random | clustered | protein lookup (clustered) |
+|---|---|---|---|
+| 200k pairs | 0.7414 | 0.3708 ±0.0262 | 0.0000 |
+| 1.57M pairs | 0.8325 | 0.3559 (1 seed) | 0.0000 |
+
+200k: 3,093 clusters / 8,638 proteins. Full: 5,047 / 22,974 — 2.66x the proteins
+for only **1.63x the families**, which is why 7.8x the data buys nothing under a
+cluster split while buying +0.09 under a random one.
+
+Clustered ligand-only floor at 200k is 0.3788 — *above* `full`. The protein branch
+contributes −0.008 once it cannot recognise the family. Don't bother swapping the
+protein encoder under this split; there is no contribution to improve.
+
+Seed spread under a cluster split is 15x wider (±0.026 vs ±0.0017) because the unit
+of variance is the family and test holds 268–458 of them. Two decimals, not four.
+
+**Dev R sits ABOVE test R under a cluster split** (e.g. 0.4599 vs 0.3559) and this
+is not overfitting — neither is a training score. Dev is a maximum over epochs
+(early stopping selects on it), and dev/test hold different families.
 
 ## Standing preferences
 
