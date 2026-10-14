@@ -160,7 +160,8 @@ def full_prepare():
               timeout=86400)
 def full_train(pooling: str = "mean", arms: str = "full,mol_zero,prot_zero",
                seeds: int = 3, max_epochs: int = 60, patience: int = 6,
-               train_n: int = 0, tag: str = "_full"):
+               train_n: int = 0, tag: str = "_full",
+               pairs: str = "pairs.parquet", meta: str = "meta.json"):
     """Train PLAPT's original head on the full data. CPU -- the head is a small MLP.
 
     Pass --train-n to extend the learning curve on a CONSISTENT test set:
@@ -168,6 +169,9 @@ def full_train(pooling: str = "mean", arms: str = "full,mol_zero,prot_zero",
     against the published 0.7414 directly would be wrong, because the test set
     also changes -- the full dataset has far more singleton proteins, so its test
     set is genuinely harder and R can fall while the model improves.
+
+    Pass --pairs pairs_clustered.parquet --meta meta_clustered.json to train on
+    the cluster split that cluster(data="/vol/data_full") writes.
     """
     import shutil
     import os
@@ -183,7 +187,8 @@ def full_train(pooling: str = "mean", arms: str = "full,mol_zero,prot_zero",
            "--proc", "/vol/data_full", "--emb", "/vol/emb_full",
            "--pooling", pooling, "--arms", arms, "--seeds", str(seeds),
            "--max-epochs", str(max_epochs), "--patience", str(patience),
-           "--threads", "16", "--tag", tag]
+           "--threads", "16", "--tag", tag,
+           "--pairs", pairs, "--meta", meta]
     if train_n:
         cmd += ["--train-n", str(train_n)]
     _run(cmd)
@@ -197,17 +202,21 @@ def full_train(pooling: str = "mean", arms: str = "full,mol_zero,prot_zero",
     vol.commit()
 
 
-@app.function(image=cluster_image, volumes=VOLUMES, cpu=8.0, memory=16384,
-              timeout=7200)
-def cluster(min_seq_id: float = 0.3, cov: float = 0.8):
+@app.function(image=cluster_image, volumes=VOLUMES, env=ENV, cpu=16.0,
+              memory=32768, timeout=7200)
+def cluster(min_seq_id: float = 0.3, cov: float = 0.8, data: str = "/vol/data"):
     """Cluster proteins at `min_seq_id` identity and build a leak-free split.
 
     CPU only -- no GPU, so this is cheap. Writes pairs_clustered.parquet and
-    meta_clustered.json into /vol/data, next to the originals.
+    meta_clustered.json into `data`, next to the originals.
+
+    data="/vol/data_full" clusters all 22,974 proteins instead of the 8,638 in
+    the 200k sample. 2.7x the sequences, so ~7x the all-vs-all comparisons the
+    prefilter has to survive -- hence 16 CPUs and 32 GB rather than 8/16.
     """
-    _run(["/app/07_cluster_split.py", "--data", "/vol/data",
+    _run(["/app/07_cluster_split.py", "--data", data,
           "--min-seq-id", str(min_seq_id), "--cov", str(cov),
-          "--threads", "8", "--workdir", "/tmp/cluster_work"])
+          "--threads", "16", "--workdir", "/tmp/cluster_work"])
     vol.commit()
 
 
