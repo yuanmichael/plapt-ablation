@@ -73,7 +73,10 @@ cluster_image = (
 )
 
 VOLUMES = {"/vol": vol}
-ENV = {"HF_HOME": "/vol/hf"}
+# PYTHONUNBUFFERED: stdout to a pipe is block-buffered, so prints without
+# flush=True sit in a 4-8 KB buffer and never reach `modal app logs`. A job that
+# is working looks identical to one that is hung.
+ENV = {"HF_HOME": "/vol/hf", "PYTHONUNBUFFERED": "1"}
 
 
 def _run(cmd: list[str]) -> None:
@@ -168,15 +171,16 @@ def full_train(pooling: str = "mean", arms: str = "full,mol_zero,prot_zero",
     """
     import shutil
     import os
-    # 03_train_ablation.py reads caches and tables from one directory.
-    os.makedirs("/vol/run_full", exist_ok=True)
-    for f in os.listdir("/vol/data_full"):
-        if f.endswith((".parquet", ".json")):
-            shutil.copy(f"/vol/data_full/{f}", f"/vol/run_full/{f}")
-    for f in os.listdir("/vol/emb_full"):
-        if f.endswith((".npy", ".json")):
-            shutil.copy(f"/vol/emb_full/{f}", f"/vol/run_full/{f}")
-    cmd = ["/app/03_train_ablation.py", "--proc", "/vol/run_full",
+    # Read the tables and the caches in place, from the two directories
+    # full_prepare wrote them to. An earlier version copied both into one
+    # directory because the script took a single --proc path; that was a silent
+    # 3.2 GB copy across a network filesystem, which looked exactly like a hang.
+    for d in ("/vol/data_full", "/vol/emb_full"):
+        if not os.path.isdir(d):
+            raise RuntimeError(f"{d} is missing -- run full_prepare first")
+        print(f"  {d}: {sorted(os.listdir(d))}", flush=True)
+    cmd = ["/app/03_train_ablation.py",
+           "--proc", "/vol/data_full", "--emb", "/vol/emb_full",
            "--pooling", pooling, "--arms", arms, "--seeds", str(seeds),
            "--max-epochs", str(max_epochs), "--patience", str(patience),
            "--threads", "16", "--tag", tag]

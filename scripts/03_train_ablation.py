@@ -259,8 +259,10 @@ def main() -> None:
                          "means prot_{pooling}.npy (the original ProtBERT run)")
     ap.add_argument("--arms", default="", help="comma-separated subset of arm names")
     ap.add_argument("--proc", default=None,
-                    help="dir holding the parquet tables and .npy caches "
-                         "(default data/processed)")
+                    help="dir holding the parquet tables (default data/processed)")
+    ap.add_argument("--emb", default=None,
+                    help="dir holding the .npy caches, if separate from --proc. "
+                         "Avoids having to co-locate a 3 GB cache with the tables.")
     ap.add_argument("--pairs", default="pairs.parquet",
                     help="which pair table to use, e.g. pairs_clustered.parquet")
     ap.add_argument("--meta", default="meta.json",
@@ -291,8 +293,9 @@ def main() -> None:
     suffix = "pooler" if args.pooling == "pooler" else "mean"
     # --prot-tag selects which protein encoder's cache to use, e.g. "_esm650".
     # The ligand cache is shared: swapping the protein encoder does not change it.
-    prot_np = np.load(PROC / f"prot_{suffix}{args.prot_tag}.npy")
-    mol_np = np.load(PROC / f"mol_{suffix}.npy")
+    emb = Path(args.emb) if args.emb else PROC
+    prot_np = np.load(emb / f"prot_{suffix}{args.prot_tag}.npy")
+    mol_np = np.load(emb / f"mol_{suffix}.npy")
     print(f"embeddings: prot {prot_np.shape} {prot_np.dtype}, "
           f"mol {mol_np.shape} {mol_np.dtype}  (pooling={args.pooling})")
     # fp16 on disk to keep the files small; fp32 in RAM because training in fp16
